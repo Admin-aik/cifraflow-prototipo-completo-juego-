@@ -1,0 +1,24 @@
+@import "tailwindcss";
+
+/* Accessibility & Enhanced Reading Text Scaling */
+.app-scale-large p,
+.app-scale-large .scale-text,
+.app-scale-large .reading-body {
+  font-size: 1.125rem !important;
+  line-height: 1.7 !important;
+}
+
+.app-scale-large .reading-title {
+  font-size: 1.35rem !important;
+}
+
+.app-scale-xlarge p,
+.app-scale-xlarge .scale-text,
+.app-scale-xlarge .reading-body {
+  font-size: 1.25rem !important;
+  line-height: 1.8 !important;
+}
+
+.app-scale-xlarge .reading-title {
+  font-size: 1.55rem !important;
+}

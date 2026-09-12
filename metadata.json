@@ -1,0 +1,8 @@
+{
+  "name": "Remix CifraFlow: Ciberseguridad Real",
+  "description": "Motor de juego educativo interactivo de simulación cibernética 3D que desmitifica la ciberseguridad y enfrenta la columna básica contra la Torre de Defensa Real.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

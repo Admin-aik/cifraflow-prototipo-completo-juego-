@@ -1,0 +1,25 @@
+{
+  "hosting": {
+    "site": "cifraflow-prototype-dev",
+    "public": "dist",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**",
+      ".deploy/**",
+      ".firebase/**",
+      "src/**",
+      "*.md",
+      "*.ts",
+      "*.tsx",
+      "vite.config.ts",
+      "tsconfig.json",
+      ".env*"
+    ],
+    "cleanUrls": true,
+    "appAssociation": "AUTO",
+    "rewrites": [
+      { "source": "**", "destination": "/index.html" }
+    ]
+  }
+}

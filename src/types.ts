@@ -13,6 +13,27 @@ export interface StudentProfile {
   section: string;
 }
 
+// User profile returned by the NestJS auth backend (`/api/auth/...`).
+export interface AuthUser {
+  id: string;
+  email: string;
+  firebaseUid?: string;
+  firstName?: string | null;
+  lastName?: string | null;
+  displayName?: string | null;
+  roles?: string[];
+  isActive?: boolean;
+  emailVerified?: boolean;
+  avatarUrl?: string | null;
+  [key: string]: unknown;
+}
+
+export interface AuthSession {
+  token: string;
+  refreshToken?: string;
+  user: AuthUser;
+}
+
 export interface AvatarStats {
   logica: number;
   auditoria: number;

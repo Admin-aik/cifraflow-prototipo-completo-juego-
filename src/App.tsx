@@ -4,10 +4,12 @@
  * Unifying Reading Comprehension, Banking (BDV/Plaza/Tesoro), Entrepreneurship, Caracas Stock Exchange (BVC) & Cybersecurity
  */
 
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   SystemPhase,
   StudentProfile,
+  AuthUser,
+  AuthSession,
   Avatar,
   ModuleDefinition,
   GameplayMission,
@@ -18,6 +20,7 @@ import {
 import { AVATARS } from './data/avatars';
 import { GAME_MODULES } from './data/gameModules';
 import { ttsAudio } from './services/ttsAudio';
+import * as api from './services/api';
 import { ArrowLeft } from 'lucide-react';
 import { CifraFlowLogo } from './components/CifraFlowLogo';
 import { TextScaleControl, TextScaleLevel } from './components/TextScaleControl';
@@ -32,11 +35,13 @@ import { Phase2ModuleSelection } from './components/Phase2ModuleSelection';
 import { Phase3Gameplay } from './components/Phase3Gameplay';
 import { Phase4GameOverLevel } from './components/Phase4GameOverLevel';
 import { Phase5FinMision } from './components/Phase5FinMision';
+import { ScoreTransmission } from './components/ScoreTransmission';
 import { RightHudPanel } from './components/RightHudPanel';
 import { MasterJsonModal } from './components/MasterJsonModal';
 
 export default function App() {
   const bcv = useBcvRate();
+  const GAME_VERSION = '2.0.0';
 
   // Navigation Phase
   const [phase, setPhase] = useState<SystemPhase>('LOGIN');
@@ -73,6 +78,13 @@ export default function App() {
 
   // Accessibility Font Size Scaling ('normal' 100%, 'large' 115%, 'xlarge' 130%)
   const [textScale, setTextScale] = useState<TextScaleLevel>('normal');
+
+  // Authenticated session (NestJS backend — CifraFlow API)
+  const [authToken, setAuthToken] = useState<string | null>(() => api.getToken());
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [syncStatus, setSyncStatus] = useState<string>('');
+  const [syncError, setSyncError] = useState<string>('');
+  const levelStartRef = useRef<number>(Date.now());
 
   const handleScaleChange = useCallback((newScale: TextScaleLevel) => {
     setTextScale(newScale);
@@ -170,14 +182,74 @@ export default function App() {
     return GAME_MODULES[0].missions[0];
   }, [activeModule, currentMissionIndex]);
 
-  // Handle Login completion (Phase 0 -> Phase 1)
-  const handleStudentLogin = (profile: StudentProfile) => {
+  // Handle successful authentication from the backend (Phase 0 -> Phase 1)
+  const handleAuthenticated = (session: AuthSession, profile: StudentProfile) => {
+    setAuthToken(session.token);
+    setAuthUser(session.user);
     setStudentProfile(profile);
     navigateToPhase('AVATAR_SELECTION');
-    const msg = `Estudiante ${profile.student_name}, cédula ${profile.student_id}, de la institución ${profile.institution} registrado con éxito. Bienvenido a la Fase 1 de CifraFlow: Selector Cinematográfico de Avatares 3D. Elige a tu operador táctico.`;
+    const msg = `Bienvenido ${profile.student_name}. Sesión de CifraFlow iniciada correctamente. Selecciona tu operador táctico 3D.`;
     setAudioNarration(msg);
     ttsAudio.speakLatinSpanish(msg);
   };
+
+  // Restore an existing session on load (persistent token in localStorage).
+  useEffect(() => {
+    if (!api.getToken()) return;
+    let cancelled = false;
+    api
+      .getMe()
+      .then((user) => {
+        if (cancelled) return;
+        setAuthUser(user);
+      })
+      .catch(() => {
+        // Invalid/expired token — clear it.
+        if (!cancelled) {
+          setAuthToken(null);
+          api.setToken(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Send the accumulated points of a completed level to the scoring backend
+  // ({score, duration, gameVersion, signature} → POST /api/play/sync-results).
+  const submitLevelScore = useCallback(
+    async (score: number) => {
+      if (!authToken || !authUser || score <= 0) return;
+      const gameId = api.getGameId();
+      if (!gameId) {
+        console.warn('[CifraFlow] VITE_GAME_ID no configurado: puntuación no enviada.');
+        return;
+      }
+      const duration = Math.max(5, Math.round((Date.now() - levelStartRef.current) / 1000));
+      setSyncStatus('Sincronizando puntos…');
+      setSyncError('');
+      try {
+        const result = await api.syncResults([
+          {
+            gameId,
+            score,
+            duration,
+            gameVersion: GAME_VERSION,
+            signature: authToken.slice(0, 64),
+          },
+        ]);
+        setSyncStatus(`✔ +${score} pts sincronizados`);
+        setSyncError('');
+        console.info('[CifraFlow] sync-results OK:', result);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Error desconocido';
+        setSyncError(message);
+        setSyncStatus('⚠ No se pudo sincronizar puntos');
+        console.error('[CifraFlow] sync-results falló:', message);
+      }
+    },
+    [authToken, authUser],
+  );
 
   // Handle Avatar Confirmation (Phase 1 -> Phase 2)
   const handleConfirmAvatar = () => {
@@ -194,6 +266,7 @@ export default function App() {
     setCurrentMissionIndex(0);
     setPuntosNivelActual(0);
     setPenalizacionesNivelActual(0);
+    levelStartRef.current = Date.now();
     navigateToPhase('GAMEPLAY');
 
     const firstMission = module.missions[0];
@@ -228,6 +301,8 @@ export default function App() {
   // Advance from Gameplay to Level Completion (Phase 3 -> Phase 4)
   const handleAdvanceToGameOver = (mission: GameplayMission) => {
     ttsAudio.playSound('gameover');
+    // Send the completed level's points to the scoring backend (non-blocking).
+    void submitLevelScore(puntosNivelActual);
     navigateToPhase('GAME_OVER_LEVEL');
 
     const isLastInModule = currentMissionIndex + 1 >= activeModule.missions.length;
@@ -250,6 +325,7 @@ export default function App() {
       setCurrentMissionIndex(nextIdx);
       setPuntosNivelActual(0);
       setPenalizacionesNivelActual(0);
+      levelStartRef.current = Date.now();
       navigateToPhase('GAMEPLAY');
 
       const nextMission = activeModule.missions[nextIdx];
@@ -467,6 +543,24 @@ export default function App() {
 
   return (
     <div className="relative min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans overflow-x-hidden selection:bg-cyan-500 selection:text-slate-950">
+      {/* Score sync status toast */}
+      {(syncStatus || syncError) && (
+        <div
+          className={`fixed z-50 bottom-4 left-4 max-w-xs px-3 py-2 rounded-xl border text-xs font-mono shadow-lg backdrop-blur-md ${
+            syncError
+              ? 'bg-red-950/90 border-red-500/50 text-red-200'
+              : 'bg-cyan-950/90 border-cyan-500/40 text-cyan-200'
+          }`}
+        >
+          <span>{syncStatus}</span>
+          {syncError && (
+            <span className="block mt-0.5 text-[10px] opacity-90 break-words">
+              {syncError}
+            </span>
+          )}
+        </div>
+      )}
+
       {/* 3D Cyber-Space Interactive Canvas (placed after login) */}
       {phase !== 'LOGIN' && (
         <div className="fixed inset-0 pointer-events-none opacity-20 z-0 overflow-hidden">
@@ -536,44 +630,26 @@ export default function App() {
             {/* Accessibility Text Scale Control - Readability enhancement */}
             <TextScaleControl scale={textScale} onChangeScale={handleScaleChange} />
 
-            {/* Phase Indicator Navigation Menu - Increased font size */}
-            <nav className="hidden xl:flex items-center gap-2 text-sm sm:text-base font-mono font-bold" aria-label="Menú de Navegación de Fases">
-              <span className={`px-3 py-1.5 rounded-xl transition-all ${phase === 'LOGIN' ? 'bg-cyan-400 text-slate-950 font-black shadow-[0_0_15px_rgba(0,243,255,0.4)]' : 'text-slate-400 hover:text-slate-200'}`}>
-                0. Login
-              </span>
-              <span className="text-slate-600 font-bold">›</span>
-              <span className={`px-3 py-1.5 rounded-xl transition-all ${phase === 'AVATAR_SELECTION' ? 'bg-fuchsia-500 text-slate-950 font-black shadow-[0_0_15px_rgba(255,0,127,0.4)]' : 'text-slate-400 hover:text-slate-200'}`}>
-                1. Avatares
-              </span>
-              <span className="text-slate-600 font-bold">›</span>
-              <span className={`px-3 py-1.5 rounded-xl transition-all ${phase === 'MODULE_SELECTION' ? 'bg-amber-400 text-slate-950 font-black shadow-[0_0_15px_rgba(251,191,36,0.4)]' : 'text-slate-400 hover:text-slate-200'}`}>
-                2. Módulos
-              </span>
-              <span className="text-slate-600 font-bold">›</span>
-              <span className={`px-3 py-1.5 rounded-xl transition-all ${phase === 'GAMEPLAY' ? 'bg-emerald-400 text-slate-950 font-black shadow-[0_0_15px_rgba(52,211,153,0.4)]' : 'text-slate-400 hover:text-slate-200'}`}>
-                3. Gameplay
-              </span>
-              <span className="text-slate-600 font-bold">›</span>
-              <span className={`px-3 py-1.5 rounded-xl transition-all ${phase === 'GAME_OVER_LEVEL' ? 'bg-cyan-400 text-slate-950 font-black shadow-[0_0_15px_rgba(0,243,255,0.4)]' : 'text-slate-400 hover:text-slate-200'}`}>
-                4. Game Over
-              </span>
-              <span className="text-slate-600 font-bold">›</span>
-              <span className={`px-3 py-1.5 rounded-xl transition-all ${phase === 'FIN_DE_LA_MISION' ? 'bg-amber-400 text-slate-950 font-black shadow-[0_0_15px_rgba(251,191,36,0.4)]' : 'text-slate-400 hover:text-slate-200'}`}>
-                5. Fin Misión
-              </span>
-            </nav>
-
-            {/* Mobile/Compact Phase Badge */}
-            <div className="xl:hidden px-3 py-1 rounded-xl bg-slate-900 border border-slate-700 text-sm font-mono font-bold text-cyan-300">
-              {phase === 'LOGIN' && '0. Login'}
-              {phase === 'AVATAR_SELECTION' && '1. Avatares'}
-              {phase === 'MODULE_SELECTION' && '2. Módulos'}
-              {phase === 'GAMEPLAY' && '3. Gameplay'}
-              {phase === 'GAME_OVER_LEVEL' && '4. Game Over'}
-              {phase === 'FIN_DE_LA_MISION' && '5. Fin Misión'}
             </div>
-          </div>
         </div>
+
+        {/* Second row: phase stepper (always visible; wraps onto further rows on narrow screens) */}
+        <nav
+          className="max-w-7xl mx-auto px-4 sm:px-6 mt-3 flex flex-wrap items-center gap-x-1.5 gap-y-1.5 text-xs sm:text-sm font-mono font-bold"
+          aria-label="Navegación de Fases (progreso)"
+        >
+          <span className={`px-2.5 py-1 rounded-lg transition-all ${phase === 'LOGIN' ? 'bg-cyan-400 text-slate-950 font-black shadow-[0_0_15px_rgba(0,243,255,0.4)]' : 'text-slate-400 hover:text-slate-200'}`}>0. Login</span>
+          <span className="text-slate-600 font-bold">›</span>
+          <span className={`px-2.5 py-1 rounded-lg transition-all ${phase === 'AVATAR_SELECTION' ? 'bg-fuchsia-500 text-slate-950 font-black shadow-[0_0_15px_rgba(255,0,127,0.4)]' : 'text-slate-400 hover:text-slate-200'}`}>1. Avatares</span>
+          <span className="text-slate-600 font-bold">›</span>
+          <span className={`px-2.5 py-1 rounded-lg transition-all ${phase === 'MODULE_SELECTION' ? 'bg-amber-400 text-slate-950 font-black shadow-[0_0_15px_rgba(251,191,36,0.4)]' : 'text-slate-400 hover:text-slate-200'}`}>2. Módulos</span>
+          <span className="text-slate-600 font-bold">›</span>
+          <span className={`px-2.5 py-1 rounded-lg transition-all ${phase === 'GAMEPLAY' ? 'bg-emerald-400 text-slate-950 font-black shadow-[0_0_15px_rgba(52,211,153,0.4)]' : 'text-slate-400 hover:text-slate-200'}`}>3. Gameplay</span>
+          <span className="text-slate-600 font-bold">›</span>
+          <span className={`px-2.5 py-1 rounded-lg transition-all ${phase === 'GAME_OVER_LEVEL' ? 'bg-cyan-400 text-slate-950 font-black shadow-[0_0_15px_rgba(0,243,255,0.4)]' : 'text-slate-400 hover:text-slate-200'}`}>4. Game Over</span>
+          <span className="text-slate-600 font-bold">›</span>
+          <span className={`px-2.5 py-1 rounded-lg transition-all ${phase === 'FIN_DE_LA_MISION' ? 'bg-amber-400 text-slate-950 font-black shadow-[0_0_15px_rgba(251,191,36,0.4)]' : 'text-slate-400 hover:text-slate-200'}`}>5. Fin Misión</span>
+        </nav>
       </header>
 
       {/* Main Container Layout with Right HUD Panel and Dynamic Text Scaling */}
@@ -584,10 +660,7 @@ export default function App() {
         <div className="flex-1 min-w-0 flex flex-col justify-center">
           {/* Phase 0: Login */}
           {phase === 'LOGIN' && (
-            <Phase0Login
-              initialProfile={studentProfile}
-              onLogin={handleStudentLogin}
-            />
+            <Phase0Login onAuthenticated={handleAuthenticated} />
           )}
 
           {/* Phase 1: Avatar Selection (Placed after login) */}
@@ -648,13 +721,21 @@ export default function App() {
 
           {/* Phase 5: Fin de la Misión */}
           {phase === 'FIN_DE_LA_MISION' && (
-            <Phase5FinMision
-              finalData={missionFinalCompletionData}
-              activeAvatar={selectedAvatar}
-              studentProfile={studentProfile}
-              onRestartAll={handleRestartAll}
-              onBackToModules={handleGoBack}
-            />
+            <>
+              <Phase5FinMision
+                finalData={missionFinalCompletionData}
+                activeAvatar={selectedAvatar}
+                studentProfile={studentProfile}
+                onRestartAll={handleRestartAll}
+                onBackToModules={handleGoBack}
+              />
+              <ScoreTransmission
+                gamePoints={puntosTotalesAcumulados}
+                hasSession={!!authToken}
+                contentId={api.getContentId()}
+                gameVersion={GAME_VERSION}
+              />
+            </>
           )}
         </div>
 

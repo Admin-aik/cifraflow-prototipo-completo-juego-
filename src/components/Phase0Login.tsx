@@ -1,56 +1,184 @@
-import React, { useState } from 'react';
-import { StudentProfile } from '../types';
-import { User, CreditCard, School, ArrowRight, Sparkles, Shield, BookOpen, Landmark, TrendingUp, LineChart, ShieldAlert } from 'lucide-react';
+import React, { useState, useRef, useEffect } from 'react';
+import { AuthSession, StudentProfile } from '../types';
+import {
+  Mail,
+  Lock,
+  ArrowRight,
+  Sparkles,
+  Shield,
+  BookOpen,
+  Landmark,
+  TrendingUp,
+  LineChart,
+  ShieldAlert,
+  Loader2,
+  Chrome,
+} from 'lucide-react';
 import { ttsAudio } from '../services/ttsAudio';
 import { CifraFlowLogo } from './CifraFlowLogo';
-import { AVATARS } from '../data/avatars';
+import {
+  loginWithCredentials,
+  loginWithGoogle,
+  getGoogleClientId,
+  ApiError,
+} from '../services/api';
 import portadaImg from '../assets/images/portada_cifraflow_1789226672479.jpg';
 
+/**
+ * Authentication via the NestJS backend (never Firebase directly).
+ * - Email + password  → POST /api/auth/login-with-credentials
+ * - Google            → obtains a Google ID token (Google Identity Services),
+ *                       then POST /api/auth/login-with-google
+ */
 interface Phase0LoginProps {
-  onLogin: (profile: StudentProfile) => void;
-  initialProfile?: StudentProfile;
+  onAuthenticated: (session: AuthSession, profile: StudentProfile) => void;
 }
 
-export const Phase0Login: React.FC<Phase0LoginProps> = ({ onLogin, initialProfile }) => {
-  const [studentName, setStudentName] = useState(initialProfile?.student_name || '');
-  const [studentId, setStudentId] = useState(initialProfile?.student_id || '');
-  const [institution, setInstitution] = useState(initialProfile?.institution || '');
+declare global {
+  interface Window {
+    google?: {
+      accounts: {
+        id: {
+          initialize: (config: Record<string, unknown>) => void;
+          renderButton: (
+            parent: HTMLElement | null,
+            options: Record<string, unknown>,
+          ) => void;
+        };
+      };
+    };
+  }
+}
+
+function loadGsiScript(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (typeof window !== 'undefined' && window.google?.accounts?.id) {
+      resolve();
+      return;
+    }
+    const existing = document.getElementById('gsi-script') as HTMLScriptElement | null;
+    if (existing) {
+      existing.addEventListener('load', () => resolve());
+      return;
+    }
+    const s = document.createElement('script');
+    s.id = 'gsi-script';
+    s.src = 'https://accounts.google.com/gsi/client';
+    s.async = true;
+    s.defer = true;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('No se pudo cargar Google Sign-In'));
+    document.head.appendChild(s);
+  });
+}
+
+const DEMO_ACCOUNTS = [
+  { label: 'Demo (Liceo)', email: 'demo.liceo@cifraflow.app', password: 'cifra123' },
+  { label: 'Demo (UCV)', email: 'demo.ucv@cifraflow.app', password: 'cifra123' },
+  { label: 'Demo (Los Próceres)', email: 'demo.proceres@cifraflow.app', password: 'cifra123' },
+  { label: 'Demo (IUPSM)', email: 'demo.iupsm@cifraflow.app', password: 'cifra123' },
+];
+
+export const Phase0Login: React.FC<Phase0LoginProps> = ({ onAuthenticated }) => {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
+  const [loading, setLoading] = useState(false);
+  const googleBtnRef = useRef<HTMLDivElement>(null);
+  const googleClientId = getGoogleClientId();
 
-  const handleQuickFill = (name: string, id: string, inst: string) => {
-    ttsAudio.playSound('switch');
-    setStudentName(name);
-    setStudentId(id);
-    setInstitution(inst);
-    setErrorMsg('');
+  const buildProfile = (session: AuthSession): StudentProfile => {
+    const user = session.user;
+    const fullName =
+      user.displayName ||
+      [user.firstName, user.lastName].filter(Boolean).join(' ').trim();
+    return {
+      student_name: fullName || user.email.split('@')[0] || 'Estudiante',
+      student_id: user.email || user.firebaseUid || user.id,
+      institution: 'Sin Institución',
+      section: 'A',
+    };
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const finishAuth = (session: AuthSession) => {
+    ttsAudio.playSound('success');
+    onAuthenticated(session, buildProfile(session));
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!studentName.trim()) {
-      setErrorMsg('Por favor ingresa el nombre del estudiante.');
+    if (!email.trim()) {
+      setErrorMsg('Por favor ingresa tu correo electrónico.');
       ttsAudio.playSound('alert');
       return;
     }
-    if (!studentId.trim()) {
-      setErrorMsg('Por favor ingresa la cédula de identidad del estudiante.');
-      ttsAudio.playSound('alert');
-      return;
-    }
-    if (!institution.trim()) {
-      setErrorMsg('Por favor ingresa la institución educativa.');
+    if (!password) {
+      setErrorMsg('Por favor ingresa tu contraseña.');
       ttsAudio.playSound('alert');
       return;
     }
 
-    ttsAudio.playSound('click');
-    onLogin({
-      student_name: studentName.trim(),
-      student_id: studentId.trim(),
-      institution: institution.trim(),
-      section: initialProfile?.section || 'A'
-    });
+    setErrorMsg('');
+    setLoading(true);
+    try {
+      const session = await loginWithCredentials(email.trim(), password);
+      finishAuth(session);
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : 'Error al iniciar sesión.';
+      setErrorMsg(message);
+      ttsAudio.playSound('alert');
+    } finally {
+      setLoading(false);
+    }
   };
+
+  const handleGoogleCredential = async (idToken: string) => {
+    setLoading(true);
+    setErrorMsg('');
+    try {
+      const session = await loginWithGoogle(idToken);
+      finishAuth(session);
+    } catch (err) {
+      const message =
+        err instanceof ApiError ? err.message : 'Error al ingresar con Google.';
+      setErrorMsg(message);
+      ttsAudio.playSound('alert');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Initialize Google Sign-In button (only when a client ID is configured).
+  useEffect(() => {
+    if (!googleClientId || !googleBtnRef.current) return;
+    let cancelled = false;
+    loadGsiScript()
+      .then(() => {
+        if (cancelled) return;
+        window.google?.accounts.id.initialize({
+          client_id: googleClientId,
+          callback: (resp: { credential?: string }) => {
+            if (resp?.credential) void handleGoogleCredential(resp.credential);
+          },
+        });
+        window.google?.accounts.id.renderButton(googleBtnRef.current, {
+          theme: 'outline',
+          size: 'large',
+          shape: 'pill',
+          width: 300,
+        });
+      })
+      .catch((err: Error) => {
+        if (!cancelled) setErrorMsg(err.message);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [googleClientId]);
+
+  const fieldClass =
+    'w-full px-4 py-3 rounded-xl bg-slate-900/90 border border-slate-700 text-white placeholder:text-slate-500 text-sm focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 font-sans transition-all';
 
   return (
     <div className="w-full max-w-4xl mx-auto space-y-6">
@@ -60,72 +188,25 @@ export const Phase0Login: React.FC<Phase0LoginProps> = ({ onLogin, initialProfil
         <div className="absolute -bottom-24 -left-24 w-60 h-60 bg-fuchsia-500/10 rounded-full blur-3xl pointer-events-none" />
 
         <div className="relative z-10 flex flex-col items-center text-center space-y-4">
-          {/* Unified Single Image around CifraFlow Logo - Sin recuadros */}
           <div className="relative w-full max-w-2xl rounded-3xl overflow-hidden border border-cyan-500/40 shadow-[0_0_40px_rgba(0,243,255,0.25)] group">
-            {/* Imagen única panorámica de los avatares integrados */}
             <img
               src={portadaImg}
               alt="Avatares CifraFlow: Jorge, Ircar, Iván y Carlos"
               className="w-full h-48 sm:h-60 md:h-64 object-cover object-center group-hover:scale-105 transition-transform duration-700"
               referrerPolicy="no-referrer"
             />
-
-            {/* Máscara y viñeta sutil para fusión armónica */}
             <div className="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-950/25 to-slate-950/20 pointer-events-none" />
             <div className="absolute inset-0 bg-radial-at-c from-transparent via-slate-950/10 to-slate-950/50 pointer-events-none" />
-
-            {/* Logotipo central de CifraFlow integrado en el centro */}
             <div className="absolute inset-0 flex flex-col items-center justify-center p-4 pointer-events-none">
               <div className="pointer-events-auto transform hover:scale-105 transition-transform duration-300 drop-shadow-[0_0_30px_rgba(0,243,255,0.7)]">
                 <CifraFlowLogo size="xl" />
               </div>
             </div>
-
-            {/* Identificación de los 4 avatares sin recuadros */}
-            <div className="absolute bottom-2.5 inset-x-0 flex flex-wrap items-center justify-center gap-2 sm:gap-3 px-3 pointer-events-auto">
-              <button
-                type="button"
-                onClick={() => ttsAudio.speakLatinSpanish("Operador Jorge: Operador táctico de accesos y nómina")}
-                className="px-2.5 py-1 rounded-full bg-slate-950/80 hover:bg-cyan-950/90 border border-cyan-400/50 text-cyan-300 text-[11px] sm:text-xs font-mono font-bold transition-all shadow cursor-pointer flex items-center gap-1.5"
-                title="Clic para escuchar a Jorge"
-              >
-                <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
-                Jorge
-              </button>
-              <button
-                type="button"
-                onClick={() => ttsAudio.speakLatinSpanish("Operadora Ircar: Especialista cloud y optimización financiera")}
-                className="px-2.5 py-1 rounded-full bg-slate-950/80 hover:bg-pink-950/90 border border-pink-400/50 text-pink-300 text-[11px] sm:text-xs font-mono font-bold transition-all shadow cursor-pointer flex items-center gap-1.5"
-                title="Clic para escuchar a Ircar"
-              >
-                <span className="w-1.5 h-1.5 rounded-full bg-pink-400 animate-pulse" />
-                Ircar
-              </button>
-              <button
-                type="button"
-                onClick={() => ttsAudio.speakLatinSpanish("Operador Iván: Auditor forense digital y detective de contratos")}
-                className="px-2.5 py-1 rounded-full bg-slate-950/80 hover:bg-emerald-950/90 border border-emerald-400/50 text-emerald-300 text-[11px] sm:text-xs font-mono font-bold transition-all shadow cursor-pointer flex items-center gap-1.5"
-                title="Clic para escuchar a Iván"
-              >
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                Iván
-              </button>
-              <button
-                type="button"
-                onClick={() => ttsAudio.speakLatinSpanish("Operador Carlos: Estratega presupuestario y emprendimiento")}
-                className="px-2.5 py-1 rounded-full bg-slate-950/80 hover:bg-amber-950/90 border border-amber-400/50 text-amber-300 text-[11px] sm:text-xs font-mono font-bold transition-all shadow cursor-pointer flex items-center gap-1.5"
-                title="Clic para escuchar a Carlos"
-              >
-                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-                Carlos
-              </button>
-            </div>
           </div>
 
-          {/* Phase 0 Badge Pill */}
           <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-cyan-950/70 border border-cyan-400/40 text-cyan-300 text-xs font-mono font-bold tracking-wide shadow-[0_0_15px_rgba(0,243,255,0.2)]">
             <Sparkles className="w-3.5 h-3.5 animate-pulse text-cyan-400" />
-            <span>FASE 0 — REGISTRO E INGRESO AL ECOSISTEMA UNIFICADO</span>
+            <span>FASE 0 — INGRESO AL ECOSISTEMA UNIFICADO</span>
           </div>
 
           <h1 className="text-2xl sm:text-4xl font-extrabold tracking-tight bg-gradient-to-r from-white via-cyan-200 to-cyan-400 bg-clip-text text-transparent">
@@ -133,10 +214,12 @@ export const Phase0Login: React.FC<Phase0LoginProps> = ({ onLogin, initialProfil
           </h1>
 
           <p className="text-slate-300 text-xs sm:text-sm max-w-xl leading-relaxed">
-            Plataforma interactiva de simulación que integra Comprensión Lectora, Primera Cuenta Bancaria (BDV/Plaza/Tesoro), <span className="text-emerald-400 font-bold">Emprendimiento</span>, Bolsa de Valores de Caracas (BVC) y Ciberseguridad Real.
+            Simulación interactiva que integra Comprensión Lectora, Primera Cuenta
+            Bancaria (BDV/Plaza/Tesoro),{' '}
+            <span className="text-emerald-400 font-bold">Emprendimiento</span>, Bolsa
+            de Valores de Caracas (BVC) y Ciberseguridad Real.
           </p>
 
-          {/* Module Badges with Green Emprendimiento */}
           <div className="flex flex-wrap items-center justify-center gap-2 pt-2">
             <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-900/90 border border-slate-700 text-slate-300 text-[11px] font-mono">
               <BookOpen className="w-3 h-3 text-cyan-400" /> Lectura & Contratos
@@ -162,14 +245,15 @@ export const Phase0Login: React.FC<Phase0LoginProps> = ({ onLogin, initialProfil
         <div className="flex items-center justify-between pb-4 mb-6 border-b border-slate-800/80">
           <div className="flex items-center gap-2.5">
             <div className="p-2 rounded-xl bg-cyan-500/10 border border-cyan-500/30 text-cyan-400">
-              <User className="w-5 h-5" />
+              <Mail className="w-5 h-5" />
             </div>
             <div>
               <h2 className="text-base sm:text-lg font-bold text-white tracking-wide">
-                Datos del Estudiante e Institución
+                Iniciar Sesión
               </h2>
               <p className="text-xs text-slate-400">
-                Registra tu nombre, cédula de identidad y centro de estudios para inicializar tu sesión de CifraFlow.
+                Autentícate con tu correo y contraseña, o con Google, para iniciar tu
+                sesión de CifraFlow.
               </p>
             </div>
           </div>
@@ -187,97 +271,63 @@ export const Phase0Login: React.FC<Phase0LoginProps> = ({ onLogin, initialProfil
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            {/* Nombre del Estudiante */}
-            <div className="space-y-1.5">
+            <div className="space-y-1.5 sm:col-span-2">
               <label className="text-xs font-mono text-slate-300 flex items-center gap-1.5">
-                <User className="w-4 h-4 text-cyan-400" />
-                <span>Nombre del Estudiante *</span>
+                <Mail className="w-4 h-4 text-cyan-400" />
+                <span>Correo Electrónico *</span>
               </label>
               <input
-                type="text"
-                value={studentName}
+                type="email"
+                value={email}
                 onChange={(e) => {
-                  setStudentName(e.target.value);
+                  setEmail(e.target.value);
                   if (errorMsg) setErrorMsg('');
                 }}
-                placeholder="Ej. Alejandro Mendoza"
-                className="w-full px-4 py-3 rounded-xl bg-slate-900/90 border border-slate-700 text-white placeholder:text-slate-500 text-sm focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 font-sans transition-all"
+                placeholder="juan.perez@correo.com"
+                className={fieldClass}
                 required
                 autoFocus
               />
             </div>
 
-            {/* Cédula de Identidad */}
-            <div className="space-y-1.5">
+            <div className="space-y-1.5 sm:col-span-2">
               <label className="text-xs font-mono text-slate-300 flex items-center gap-1.5">
-                <CreditCard className="w-4 h-4 text-cyan-400" />
-                <span>Cédula de Identidad *</span>
+                <Lock className="w-4 h-4 text-cyan-400" />
+                <span>Contraseña *</span>
               </label>
               <input
-                type="text"
-                value={studentId}
+                type="password"
+                value={password}
                 onChange={(e) => {
-                  setStudentId(e.target.value);
+                  setPassword(e.target.value);
                   if (errorMsg) setErrorMsg('');
                 }}
-                placeholder="Ej. V-28.123.456"
-                className="w-full px-4 py-3 rounded-xl bg-slate-900/90 border border-slate-700 text-white placeholder:text-slate-500 text-sm focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 font-sans transition-all"
+                placeholder="••••••••"
+                className={fieldClass}
                 required
               />
             </div>
           </div>
 
-          {/* Institución Educativa */}
-          <div className="space-y-1.5">
-            <label className="text-xs font-mono text-slate-300 flex items-center gap-1.5">
-              <School className="w-4 h-4 text-cyan-400" />
-              <span>Institución Educativa (Liceo, Colegio o Universidad) *</span>
-            </label>
-            <input
-              type="text"
-              value={institution}
-              onChange={(e) => {
-                setInstitution(e.target.value);
-                if (errorMsg) setErrorMsg('');
-              }}
-              placeholder="Ej. Liceo Bolivariano Gran Colombia / UCV / Complejo Los Próceres"
-              className="w-full px-4 py-3 rounded-xl bg-slate-900/90 border border-slate-700 text-white placeholder:text-slate-500 text-sm focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 font-sans transition-all"
-              required
-            />
-          </div>
-
           {/* Quick Demo Fillers */}
           <div className="pt-2 flex flex-wrap items-center justify-between gap-2 text-xs">
-            <span className="text-slate-400 text-[11px] font-mono">Autocompletar de prueba rápida:</span>
+            <span className="text-slate-400 text-[11px] font-mono">Autocompletar demo:</span>
             <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={() => handleQuickFill('Ircar Rojas', 'V-29.412.873', 'Liceo Tecnológico Simón Bolívar')}
-                className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-pink-300 text-[11px] font-mono transition-colors cursor-pointer"
-              >
-                Ircar (Liceo)
-              </button>
-              <button
-                type="button"
-                onClick={() => handleQuickFill('Jorge Medina', 'V-28.951.204', 'Universidad Central de Venezuela (UCV)')}
-                className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-cyan-300 text-[11px] font-mono transition-colors cursor-pointer"
-              >
-                Jorge (UCV)
-              </button>
-              <button
-                type="button"
-                onClick={() => handleQuickFill('Iván Albornoz', 'V-30.145.890', 'Complejo Educativo Los Próceres')}
-                className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-emerald-300 text-[11px] font-mono transition-colors cursor-pointer"
-              >
-                Iván (C.E. Los Próceres)
-              </button>
-              <button
-                type="button"
-                onClick={() => handleQuickFill('Carlos Rivas', 'V-27.819.340', 'IUP Santiago Mariño')}
-                className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-amber-300 text-[11px] font-mono transition-colors cursor-pointer"
-              >
-                Carlos (IUPSM)
-              </button>
+              {DEMO_ACCOUNTS.map((acc) => (
+                <button
+                  key={acc.email}
+                  type="button"
+                  onClick={() => {
+                    ttsAudio.playSound('switch');
+                    setEmail(acc.email);
+                    setPassword(acc.password);
+                    setErrorMsg('');
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-cyan-300 text-[11px] font-mono transition-colors cursor-pointer"
+                >
+                  {acc.label}
+                </button>
+              ))}
             </div>
           </div>
 
@@ -285,13 +335,51 @@ export const Phase0Login: React.FC<Phase0LoginProps> = ({ onLogin, initialProfil
           <div className="pt-4">
             <button
               type="submit"
-              className="w-full group py-3.5 px-6 rounded-2xl bg-gradient-to-r from-cyan-500 via-cyan-400 to-emerald-400 hover:from-cyan-400 hover:to-emerald-300 text-slate-950 font-bold font-mono text-sm tracking-wide flex items-center justify-center gap-2 shadow-[0_0_25px_rgba(0,243,255,0.4)] hover:shadow-[0_0_35px_rgba(0,243,255,0.6)] transform hover:scale-[1.01] transition-all cursor-pointer"
+              disabled={loading}
+              className="w-full group py-3.5 px-6 rounded-2xl bg-gradient-to-r from-cyan-500 via-cyan-400 to-emerald-400 hover:from-cyan-400 hover:to-emerald-300 text-slate-950 font-bold font-mono text-sm tracking-wide flex items-center justify-center gap-2 shadow-[0_0_25px_rgba(0,243,255,0.4)] hover:shadow-[0_0_35px_rgba(0,243,255,0.6)] transform hover:scale-[1.01] transition-all cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              <span>Registrar Estudiante y Elegir Avatar</span>
-              <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+              {loading ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>Autenticando…</span>
+                </>
+              ) : (
+                <>
+                  <span>Iniciar Sesión y Elegir Avatar</span>
+                  <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+                </>
+              )}
             </button>
           </div>
         </form>
+
+        {/* Google Sign-In divider */}
+        <div className="flex items-center gap-3 my-6">
+          <div className="flex-1 h-px bg-slate-800" />
+          <span className="text-xs font-mono text-slate-500">O continúa con</span>
+          <div className="flex-1 h-px bg-slate-800" />
+        </div>
+
+        {googleClientId ? (
+          <div className="flex flex-col items-center">
+            <div ref={googleBtnRef} className="min-h-[46px]" />
+          </div>
+        ) : (
+          <div className="flex flex-col items-center gap-2">
+            <button
+              type="button"
+              disabled
+              title="Configura VITE_GOOGLE_CLIENT_ID para habilitar el inicio de sesión con Google"
+              className="w-full max-w-xs inline-flex items-center justify-center gap-2.5 px-4 py-2.5 rounded-xl bg-slate-900/80 border border-slate-700 text-slate-400 text-sm font-medium cursor-not-allowed opacity-70"
+            >
+              <Chrome className="w-4 h-4" />
+              <span>Continuar con Google</span>
+            </button>
+            <span className="text-[11px] font-mono text-slate-500">
+              Se habilitará al configurar VITE_GOOGLE_CLIENT_ID (Google Identity Services).
+            </span>
+          </div>
+        )}
       </div>
     </div>
   );
